@@ -9,4 +9,17 @@ environment:
   matrix:
     - nodejs_version: "0.12"
 
+install:
+  # Typical npm stuff.
+  - md C:\nc
+  - npm install -g npm@^2
+  - npm config set cache C:\nc
+  - npm version
+  - npm install
 
+test_script:
+  # Output useful info for debugging.
+  - npm version
+  - cmd: npm run test
+
+version: "{build}"
