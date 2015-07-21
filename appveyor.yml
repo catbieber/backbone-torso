@@ -15,6 +15,8 @@ install:
   - npm install -g npm@^2
   # hide python so node-gyp won't try to build native extentions
   - rename C:\Python27 Python27hidden
+  # Workaround https://github.com/npm/npm/wiki/Troubleshooting#upgrading-on-windows
+  - set PATH=%APPDATA%\npm;%PATH%
   - npm config set cache C:\nc
   - npm version
   - npm install
