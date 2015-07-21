@@ -13,6 +13,8 @@ install:
   # Typical npm stuff.
   - md C:\nc
   - npm install -g npm@^2
+  # hide python so node-gyp won't try to build native extentions
+  - rename C:\Python27 Python27hidden
   - npm config set cache C:\nc
   - npm version
   - npm install
