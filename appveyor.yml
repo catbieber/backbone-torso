@@ -10,6 +10,10 @@ environment:
     - nodejs_version: "0.12"
 
 install:
+  # Get the latest stable version of Node 0.STABLE.latest
+  - ps: Install-Product node $env:nodejs_version
+  # Install PhantomJS
+  - cinst PhantomJS -y
   # Typical npm stuff.
   - md C:\nc
   - npm install -g npm@^2
