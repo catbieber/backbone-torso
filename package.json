@@ -9,13 +9,10 @@
     "build": "gulp",
     "prepublish": "gulp bundle",
     "test": "gulp test",
+    "test:cover": "istanbul cover --include-all-sources jasmine-node test"
     "doc": "gulp doc",
     "watch": "gulp watch",
     "clean": "gulp clean"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/vecnatechnologies/backbone-torso"
   },
   "main": "modules/torso.js",
   "dependencies": {
@@ -27,6 +24,7 @@
   },
   "devDependencies": {
     "browserify": "^9.0.3",
+    "coveralls": "^2.11.3",
     "del": "^1.1.1",
     "gulp": "^3.8.8",
     "gulp-cached": "^1.0.2",
@@ -43,6 +41,7 @@
     "gulp-wrap": "0.9.0",
     "gulp-yuidoc": "^0.1.2",
     "handlebars": "3.0.0",
+    "istanbul": "^0.3.17",
     "jasmine": "~2.2.1",
     "jasmine-reporters": "2.0.2",
     "jasmine-spec-reporter": "2.1.0",
@@ -64,14 +63,18 @@
   "engines": {
     "node": ">=0.8.0"
   },
-  "contributors": [{
-    "name": "Kent Willis",
-    "email": "kentmw@gmail.com"
-  }, {
-    "name": "Ariel Wexler",
-    "email": "arielwex@gmail.com"
-  }, {
-    "name": "Josh Young",
-    "email": "jyoung@vecna.com"
-  }]
+  "contributors": [
+    {
+      "name": "Kent Willis",
+      "email": "kentmw@gmail.com"
+    },
+    {
+      "name": "Ariel Wexler",
+      "email": "arielwex@gmail.com"
+    },
+    {
+      "name": "Josh Young",
+      "email": "jyoung@vecna.com"
+    }
+  ]
 }
