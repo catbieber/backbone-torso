@@ -9,7 +9,7 @@
     "build": "gulp",
     "prepublish": "gulp bundle",
     "test": "gulp test",
-    "test:cover": "istanbul cover --include-all-sources jasmine-node test"
+    "test:cover": "istanbul cover --include-all-sources jasmine-node test",
     "doc": "gulp doc",
     "watch": "gulp watch",
     "clean": "gulp clean"
