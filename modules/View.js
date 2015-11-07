@@ -1,13 +1,13 @@
 (function(root, factory) {
   if (typeof define === 'function' && define.amd) {
-    define(['underscore', 'backbone', './templateRenderer', './Cell'], factory);
+    define(['underscore', 'jquery', 'backbone', './templateRenderer', './Cell'], factory);
   } else if (typeof exports === 'object') {
-    module.exports = factory(require('underscore'), require('backbone'), require('./templateRenderer'), require('./Cell'));
+    module.exports = factory(require('underscore'), require('jquery'), require('backbone'), require('./templateRenderer'), require('./Cell'));
   } else {
     root.Torso = root.Torso || {};
-    root.Torso.View = factory(root._, root.Backbone, root.Torso.Utils.templateRenderer, root.Torso.Cell);
+    root.Torso.View = factory(root._, root.$, root.Backbone, root.Torso.Utils.templateRenderer, root.Torso.Cell);
   }
-}(this, function(_, Backbone, templateRenderer, Cell) {
+}(this, function(_, $, Backbone, templateRenderer, Cell) {
   'use strict';
 
   /**
@@ -23,17 +23,19 @@
     viewState: null,
     template: null,
     feedback: null,
-    feedbackModel: null,
+    feedbackCell: null,
     __childViews: null,
+    __sharedViews: null,
     __isActive: false,
     __isAttachedToParent: false,
     __isDisposed: false,
+    __attachedCallbackInvoked: false,
     __feedbackEvents: null,
     /**
      * Array of feedback when-then-to's. Example:
      * [{
      *   when: {'@fullName': ['change']},
-     *   then: function(event) { return {text: this.feedbackModel.get('fullName')};},
+     *   then: function(event) { return {text: this.feedbackCell.get('fullName')};},
      *   to: 'fullName-feedback'
      * }]
      * @private
@@ -49,8 +51,9 @@
     constructor: function(options) {
       options = options || {};
       this.viewState = new Cell();
-      this.feedbackModel = new Cell();
+      this.feedbackCell = new Cell();
       this.__childViews = {};
+      this.__sharedViews = {};
       this.__feedbackEvents = [];
       Backbone.View.apply(this, arguments);
       if (!options.noActivate) {
@@ -99,7 +102,10 @@
     templateRender: function(el, template, context, opts) {
       // Detach just this view's child views for a more effective hotswap.
       // The child views will be reattached by the render method.
-      this.detachChildViews();
+      this.detachTrackedViews({ shared: false });
+      // Detach just this view's shared views for a more effective hotswap.
+      // The shared views will be reattached by the render method.
+      this.detachTrackedViews({ shared: true });
       templateRenderer.render(el, template, context, opts);
     },
 
@@ -112,8 +118,13 @@
     delegateEvents: function() {
       Backbone.View.prototype.delegateEvents.call(this);
       this.__generateFeedbackBindings();
-      this.__generateFeedbackModelCallbacks();
+      this.__generateFeedbackCellCallbacks();
       _.each(this.__childViews, function(view) {
+        if (view.isAttachedToParent()) {
+          view.delegateEvents();
+        }
+      });
+      _.each(this.__sharedViews, function(view) {
         if (view.isAttachedToParent()) {
           view.delegateEvents();
         }
@@ -130,6 +141,9 @@
       _.each(this.__childViews, function(view) {
         view.undelegateEvents();
       });
+      _.each(this.__sharedViews, function(view) {
+        view.undelegateEvents();
+      });
     },
 
     /**
@@ -139,12 +153,12 @@
      * @param injectionSite {String} The name of the injection site in the layout template
      * @param view          {View}   The instantiated view object to
      * @param [options] {Object} optionals options object
-     * @param   [options.noActivate=false] {Boolean} if set to true, the child view will not be activated upon attaching.
+     * @param   [options.noActivate=false] {Boolean} if set to true, the view will not be activated upon attaching.
      */
     injectView: function(injectionSite, view, options) {
       var injectionPoint = this.$('[inject=' + injectionSite + ']');
       if (view && injectionPoint.size() > 0) {
-        this.attachChildView(injectionPoint, view, options);
+        this.attachView(injectionPoint, view, options);
       }
     },
 
@@ -160,6 +174,7 @@
         } else {
           this.$el.detach();
         }
+        this.invokeDetached();
         this.undelegateEvents();
         this.__isAttachedToParent = false;
       }
@@ -175,6 +190,9 @@
         this.render();
         this.injectionSite = $el.replaceWith(this.$el);
         this.delegateEvents();
+        if (!this.__attachedCallbackInvoked && this.isAttached()) {
+          this.invokeAttached();
+        }
         this.__isAttachedToParent = true;
       }
     },
@@ -185,7 +203,8 @@
      * @method deactivate
      */
     deactivate: function() {
-      this.deactivateChildViews();
+      this.deactivateTrackedViews({ shared: false });
+      this.deactivateTrackedViews({ shared: true });
       if (this.isActive()) {
         this._deactivate();
         this.__isActive = false;
@@ -197,7 +216,8 @@
      * @method activate
      */
     activate: function() {
-      this.activateChildViews();
+      this.activateTrackedViews({ shared: false });
+      this.activateTrackedViews({ shared: true });
       if (!this.isActive()) {
         this._activate();
         this.__isActive = true;
@@ -259,10 +279,25 @@
      */
     _activate: _.noop,
 
+    /**
+     * Method to be invoked when the view is fully attached to the DOM (NOT just the parent). Use this method to manipulate the view
+     * after the DOM has been attached to the document. The default implementation is a no-op.
+     * @method _attached
+     */
+    _attached: _.noop,
+
+    /**
+     * Method to be invoked when the view is detached from the DOM (NOT just the parent). Use this method to clean up state
+     * after the view has been removed from the document. The default implementation is a no-op.
+     * @method _detached
+     */
+    _detached: _.noop,
+
         /**
      * Before any DOM rendering is done, this method is called and removes any
      * custom plugins including events that attached to the existing elements.
      * This method can be overwritten as usual OR extended using <baseClass>.prototype.plug.apply(this, arguments);
+     * NOTE: if you require the view to be detached from the DOM, consider using _detach callback
      * @method unplug
      */
     unplug: _.noop,
@@ -271,9 +306,46 @@
      * After all DOM rendering is done, this method is called and attaches any
      * custom plugins to the existing elements.  This method can be overwritten
      * as usual OR extended using <baseClass>.prototype.plug.apply(this, arguments);
+     * NOTE: if you require the view to be attached to the DOM, consider using _attach callback
      * @method plug
      */
     plug: _.noop,
+
+    /**
+     * Gets the hash from id to views of the correct views given the options.
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method __getTrackedViewsHash
+     */
+    __getTrackedViewsHash: function(options) {
+      options = options || {};
+      if (options.shared) {
+        return this.__sharedViews;
+      } else {
+        return this.__childViews;
+      }
+    },
+
+    /**
+     * Registers the child or shared view if not already done so, then calls view.attach with the element argument
+     * @param $el {jQuery element} the element to attach to.
+     * @param view {View} the view
+     * @param [options] {Object} optionals options object
+     *   @param [options.noActivate=false] {Boolean} if set to true, the view will not be activated upon attaching.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method attachView
+     */
+    attachView: function($el, view, options) {
+      options = options || {};
+      view.detach();
+      this.registerTrackedView(view, options);
+      view.attach($el);
+      if (!options.noActivate) {
+        view.activate();
+      }
+    },
 
     /**
      * Registers the child view if not already done so, then calls view.attach with the element argument
@@ -282,31 +354,63 @@
      * @param [options] {Object} optionals options object
      * @param   [options.noActivate=false] {Boolean} if set to true, the child view will not be activated upon attaching.
      * @method attachChildView
+     * @deprecated 0.3.x - use this.attachView($el, view, { shared: false }); instead
      */
     attachChildView: function($el, view, options) {
-      options = options || {};
-      view.detach();
-      this.registerChildView(view);
-      view.attach($el);
-      if (!options.noActivate) {
-        view.activate();
-      }
+      _.extend(options, { shared: false });
+      this.attachView($el, view, options);
+    },
+
+    /**
+     * @return {Boolean} true if this view has shared views
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method hasTrackedViews
+     */
+    hasTrackedViews: function(options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      return !_.isEmpty(trackedViewsHash);
     },
 
     /**
      * @return {Boolean} true if this view has child views
      * @method hasChildViews
+     * @deprecated 0.3.x - use this.hasTrackedViews({ shared: false }); instead
      */
     hasChildViews: function() {
-      return !_.isEmpty(this.__childViews);
+      return this.hasTrackedViews({ shared: false });
+    },
+
+    /**
+     * @return all of the shared views this list view has registered
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method getTrackedViews
+     */
+    getTrackedViews: function(options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      return _.values(trackedViewsHash);
     },
 
     /**
      * @return all of the child views this list view has registered
      * @method getChildViews
+     * @deprecated 0.3.x - use this.getTrackedViews({ shared: false }); instead
      */
     getChildViews: function() {
-      return _.values(this.__childViews);
+      return this.getTrackedViews({ shared: false });
+    },
+
+    /**
+     * @return the view with the given cid.  Will look in both shared and tracked views.
+     * @method getTrackedView
+     */
+    getTrackedView: function(viewCID) {
+      var childView = this.__childViews[viewCID],
+          sharedView = this.__sharedViews[viewCID];
+      return childView || sharedView;
     },
 
     /**
@@ -314,9 +418,10 @@
      * @param viewCID {cid} the view cid
      * @return the child view corresponding to the cid
      * @method getChildView
+     * @deprecated 0.3.x - use this.getTrackedView(viewCID); instead
      */
     getChildView: function(viewCID) {
-      return this.__childViews[viewCID];
+      return this.getTrackedView(viewCID);
     },
 
     /**
@@ -330,62 +435,156 @@
     },
 
     /**
+     * Deactivates all tracked views (either all shared or all child views based on options.shared).
+     *
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method deactivateTrackedViews
+     */
+    deactivateTrackedViews: function(options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      _.each(trackedViewsHash, function(view) {
+        view.deactivate();
+      });
+    },
+
+    /**
      * Deactivates all child views recursively
      * @method deactivateChildViews
+     * @deprecated 0.3.x - use this.deactivateTrackedViews({ shared: false }); instead
      */
     deactivateChildViews: function() {
-      _.each(this.__childViews, function(view) {
-        view.deactivate();
+      this.deactivateTrackedViews({ shared: false });
+    },
+
+    /**
+     * Detach all shared views (either all shared or all child views based on options.shared).
+     * NOTE: this is not recursive - it will not separate the entire view tree.
+     *
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method detachSharedViews
+     */
+    detachTrackedViews: function(options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      _.each(trackedViewsHash, function(view) {
+        view.detach();
       });
     },
 
     /**
      * Detach all child views. NOTE: this is not recursive - it will not separate the entire view tree.
      * @method detachChildViews
+     * @deprecated 0.3.x - use this.detachTrackedViews({ shared: false }); instead
      */
     detachChildViews: function() {
-      _.each(this.__childViews, function(view) {
-        view.detach();
+      this.detachTrackedViews({ shared: false });
+    },
+
+    /**
+     * Activates all tracked views (either all shared or all child views based on options.shared).
+     *
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @method activateTrackedViews
+     */
+    activateTrackedViews: function(options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      _.each(trackedViewsHash, function(view) {
+        view.activate();
       });
     },
 
     /**
      * Activates all child views
      * @method activateChildViews
+     * @deprecated 0.3.x - use this.activateTrackedViews({ shared: false }); instead
      */
     activateChildViews: function() {
-      _.each(this.__childViews, function(view) {
-        view.activate();
-      });
+      this.activateTrackedViews({ shared: false });
+    },
+
+    /**
+     * Binds the view as a tracked view - any recursive calls like activate, deactivate, or dispose will
+     * be done to the tracked view as well.  Except dispose for shared views.
+     *
+     * @param view {View} the tracked view
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @return {View} the tracked view
+     * @method registerTrackedView
+     */
+    registerTrackedView: function(view, options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      trackedViewsHash[view.cid] = view;
+      return view;
     },
 
     /**
      * Binds the view as a child view - any recursive calls like activate, deactivate, or dispose will
      * be done to the child view as well.
      * @param view {View} the child view
+     * @return {View} the child view
      * @method registerChildView
+     * @deprecated 0.3.x - use this.registerTrackedView(view, { shared: false }); instead
      */
     registerChildView: function(view) {
-      this.__childViews[view.cid] = view;
+      return this.registerTrackedView(view, { shared: false });
+    },
+
+    /**
+     * Unbinds the tracked view - no recursive calls will be made to this shared view
+     * @param view {View} the shared view
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @return {View} the tracked view
+     * @method unregisterTrackedView
+     */
+    unregisterTrackedView: function(view, options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      delete trackedViewsHash[view.cid];
+      return view;
     },
 
     /**
      * Unbinds the child view - no recursive calls will be made to this child view
      * @param view {View} the child view
      * @method unregisterChildView
+     * @deprecated 0.3.x - use this.unregisterTrackedView(view, { shared: false }); instead
      */
     unregisterChildView: function(view) {
-      delete this.__childViews[view.cid];
+      return this.unregisterTrackedView(view, { shared: false });
+    },
+
+    /**
+     * Unbinds all tracked view - no recursive calls will be made to this shared view
+     * (either all shared or all child views based on options.shared).
+     * @param view {View} the shared view
+     * @param [options={}] {Object}  Optional options.
+     *   @param [options.shared=false] {Boolean} The view is a shared view instead of a child view
+     *                                           (shared views are not disposed when the parent is disposed)
+     * @return {View} the tracked view
+     * @method unregisterTrackedView
+     */
+    unregisterTrackedViews: function(options) {
+      var trackedViewsHash = this.__getTrackedViewsHash(options);
+      _.each(trackedViewsHash, function(view) {
+        this.unregisterTrackedView(view, options);
+      }, this);
     },
 
     /**
      * Unregisters all child views
      * @method unregisterChildViews
+     * @deprecated 0.3.x - use this.unregisterTrackedViews({ shared: false }); instead
      */
     unregisterChildViews: function() {
-      _.each(this.__childViews, function(view) {
-        this.unregisterChildView(view);
-      }, this);
+      this.unregisterTrackedViews({ shared: false });
     },
 
     /**
@@ -394,6 +593,15 @@
      */
     isAttachedToParent: function() {
       return this.__isAttachedToParent;
+    },
+
+    /**
+     * NOTE: depends on a global variable "document"
+     * @returns {Boolean} true if the view is attached to the DOM
+     * @method isAttached
+     */
+    isAttached: function() {
+      return $.contains(document, this.$el[0]);
     },
 
     /**
@@ -429,40 +637,80 @@
             return to === toToCheck;
           }
         }),
-        feedbackModelField = to;
+        feedbackCellField = to;
       if (feedbackToInvoke) {
         if (indexMap) {
-          feedbackModelField = this.__substituteIndicesUsingMap(to, indexMap);
+          feedbackCellField = this.__substituteIndicesUsingMap(to, indexMap);
         }
         result = feedbackToInvoke.then.call(this, evt, indexMap);
-        this.__processFeedbackThenResult(result, feedbackModelField);
+        this.__processFeedbackThenResult(result, feedbackCellField);
       }
+    },
+
+    /**
+     * Call this method when a view is attached to the DOM. It is recursive to child views, but checks whether each child view is attached.
+     * @method invokeAttached
+     */
+    invokeAttached: function() {
+      // Need to check if each view is attached because there is no guarentee that if parent is attached, child is attached.
+      if (!this.__attachedCallbackInvoked) {
+        this._attached();
+        this.__attachedCallbackInvoked = true;
+        _.each(this.__childViews, function(view) {
+          if (view.isAttachedToParent()) {
+            view.invokeAttached();
+          }
+        });
+        _.each(this.__sharedViews, function(view) {
+          if (view.isAttachedToParent()) {
+            view.invokeAttached();
+          }
+        });
+      }
+    },
+
+    /**
+     * Call this method when a view is detached from the DOM. It is recursive to child views.
+     * @method invokeDetached
+     */
+    invokeDetached: function() {
+      // No need to check if child views are actually detached, because if parent is detached, children are detached.
+      if (this.__attachedCallbackInvoked) {
+        this._detached();
+        this.__attachedCallbackInvoked = false;
+      }
+      _.each(this.__childViews, function(view) {
+        view.invokeDetached();
+      });
+      _.each(this.__sharedViews, function(view) {
+        view.invokeDetached();
+      });
     },
 
     /************** Private methods **************/
 
     /**
-     * Generates callbacks for changes in feedback model fields
-     * 'change fullName' -> invokes all the jQuery (or $) methods on the element as stored by the feedback model
-     * If feedbackModel.get('fullName') returns:
+     * Generates callbacks for changes in feedback cell fields
+     * 'change fullName' -> invokes all the jQuery (or $) methods on the element as stored by the feedback cell
+     * If feedbackCell.get('fullName') returns:
      * { text: 'my text',
      *   attr: {class: 'newClass'}
      *   hide: [100, function() {...}]
      * ...}
      * Then it will invoke $element.text('my text'), $element.attr({class: 'newClass'}), etc.
      * @private
-     * @method __generateFeedbackModelCallbacks
+     * @method __generateFeedbackCellCallbacks
      */
-    __generateFeedbackModelCallbacks: function() {
+    __generateFeedbackCellCallbacks: function() {
       var self = this;
       // Feedback one-way bindings
-      self.feedbackModel.off();
+      self.feedbackCell.off();
       _.each(this.$('[data-feedback]'), function(element) {
         var attr = $(element).data('feedback');
-        self.feedbackModel.on('change:' + attr, (function(field) {
+        self.feedbackCell.on('change:' + attr, (function(field) {
           return function() {
             var $element,
-              state = self.feedbackModel.get(field);
+              state = self.feedbackCell.get(field);
             if (!state) {
               return;
             }
@@ -483,22 +731,22 @@
           };
         })(attr));
       });
-      _.each(self.feedbackModel.attributes, function(value, attr) {
-        self.feedbackModel.trigger('change:' + attr);
+      _.each(self.feedbackCell.attributes, function(value, attr) {
+        self.feedbackCell.trigger('change:' + attr);
       });
     },
 
     /**
-     * Processes the result of the then method. Adds to the feedback model.
+     * Processes the result of the then method. Adds to the feedback cell.
      * @param result {Object} the result of the then method
-     * @param feedbackModelField {Object} the name of the feedbackModelField, typically the "to" value.
+     * @param feedbackCellField {Object} the name of the feedbackCellField, typically the "to" value.
      * @private
      * @method __processFeedbackThenResult
      */
-    __processFeedbackThenResult: function(result, feedbackModelField) {
+    __processFeedbackThenResult: function(result, feedbackCellField) {
       var newState = $.extend({}, result);
-      this.feedbackModel.set(feedbackModelField, newState, {silent: true});
-      this.feedbackModel.trigger('change:' + feedbackModelField);
+      this.feedbackCell.set(feedbackCellField, newState, {silent: true});
+      this.feedbackCell.trigger('change:' + feedbackCellField);
     },
 
     /**
@@ -555,7 +803,7 @@
 
             // track the indices for binding
             bindInfo = {
-              feedbackModelField: fieldName,
+              feedbackCellField: fieldName,
               fn: then,
               indices: indexMap
             };
@@ -569,7 +817,7 @@
                   newState = {};
                   args.push(bindInfo.indices);
                   result = bindInfo.fn.apply(self, args);
-                  self.__processFeedbackThenResult(result, bindInfo.feedbackModelField);
+                  self.__processFeedbackThenResult(result, bindInfo.feedbackCellField);
                 };
               delegateEventSplitter = /^(\S+)\s*(.*)$/;
               match = eventKey.match(delegateEventSplitter);
@@ -585,7 +833,7 @@
                     }];
                 args.push(bindInfo.indices);
                 result = bindInfo.fn.apply(self, args);
-                self.__processFeedbackThenResult(result, bindInfo.feedbackModelField);
+                self.__processFeedbackThenResult(result, bindInfo.feedbackCellField);
               };
               self.on(eventKey, invokeThen, self);
               self.__feedbackEvents.push(invokeThen);
@@ -739,7 +987,7 @@
       }
     }
 
-    /************** End Feedback **************/
+    /************** End Private methods **************/
   });
 
   return View;
